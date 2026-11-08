@@ -1,0 +1,34 @@
+name: backend-ci
+on:
+  push: { branches: [main] }
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      # Mongo service containers can't take a custom command, so start the replica set via a fresh container instead:
+      - run: docker run -d --name rs -p 27018:27017 mongo:8.2 --replSet rs0 && sleep 8 && docker exec rs mongosh --quiet --eval "rs.initiate()"
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+        env:
+          MONGO_URL_TEST: mongodb://localhost:27018/ecom_test?replicaSet=rs0&directConnection=true
+      - name: OpenAPI contract
+        run: npm run openapi
+      - uses: actions/upload-artifact@v4
+        with: { name: openapi, path: openapi/openapi.json }
+  docker:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: write }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      - uses: docker/build-push-action@v6
+        with: { push: true, tags: "ghcr.io/${{ github.repository }}:latest,ghcr.io/${{ github.repository }}:${{ github.sha }}" }

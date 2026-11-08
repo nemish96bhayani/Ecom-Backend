@@ -1,0 +1,30 @@
+# Production edge: automatic HTTPS for the platform AND every verified client domain.
+# Caddy asks the API before issuing a certificate, so only verified store domains get one.
+{
+	email ops@yourplatform.in
+	on_demand_tls {
+		ask http://api:4000/internal/caddy/ask
+	}
+}
+
+# API
+api.yourplatform.in {
+	reverse_proxy api:4000
+}
+
+# Merchant + super-admin panel (static React build)
+admin.yourplatform.in {
+	root * /srv/admin
+	encode zstd gzip
+	try_files {path} /index.html
+	file_server
+}
+
+# Every store: *.yourplatform.in subdomains and client custom domains → storefront SSR server
+https:// {
+	tls {
+		on_demand
+	}
+	encode zstd gzip
+	reverse_proxy storefront:3000
+}
