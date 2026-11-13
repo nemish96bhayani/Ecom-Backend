@@ -35,11 +35,36 @@ const schema = z.object({
   SMTP_USER: z.string().optional(),
   SMTP_PASS: z.string().optional(),
   MAIL_FROM: z.string().default("no-reply@yourplatform.in"),
-  MESSAGING_PROVIDER: z.enum(["log", "custom"]).default("log"),
+  MESSAGING_PROVIDER: z.enum(["log", "msg91", "custom"]).default("log"),
+  MSG91_AUTH_KEY: z.string().optional(),
+  MSG91_TEMPLATES: z.string().optional(), // JSON: { "otp": "<template id>", ... }
+  MANDATE_PROVIDER: z.enum(["manual"]).default("manual"),
   META_GRAPH_VERSION: z.string().default("v21.0"),
   SUPERADMIN_EMAIL: z.string().optional(),
   SUPERADMIN_PASSWORD: z.string().optional(),
+  // Opt-in for local dev only: return OTP codes in the API response. Off by default; never honoured in production.
+  EXPOSE_DEV_OTP: z.string().optional(),
 });
 
 export const env = schema.parse(process.env);
 export const isProd = env.NODE_ENV === "production";
+
+if (env.MESSAGING_PROVIDER === "msg91" && !env.MSG91_AUTH_KEY) {
+  throw new Error("MESSAGING_PROVIDER=msg91 needs MSG91_AUTH_KEY");
+}
+
+// Refuse to start a production server with placeholder or short secrets.
+if (isProd) {
+  const weak = ["change-me-internal", "changeme", "secret"];
+  const checks: [string, string][] = [
+    ["INTERNAL_PROXY_SECRET", env.INTERNAL_PROXY_SECRET],
+    ["JWT_ACCESS_SECRET", env.JWT_ACCESS_SECRET],
+    ["JWT_REFRESH_SECRET", env.JWT_REFRESH_SECRET],
+    ["JWT_CUSTOMER_SECRET", env.JWT_CUSTOMER_SECRET],
+  ];
+  for (const [name, value] of checks) {
+    if (value.length < 32 || weak.includes(value.toLowerCase())) {
+      throw new Error(`${name} must be at least 32 random characters in production`);
+    }
+  }
+}

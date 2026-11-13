@@ -8,6 +8,7 @@ import { rateLimit, ipKeyGenerator } from "express-rate-limit";
 import { pinoHttp } from "pino-http";
 import { env } from "./config/env.js";
 import { logger } from "./lib/logger.js";
+import { timingSafeEqualStr } from "./lib/crypto.js";
 import { errorHandler, notFoundHandler } from "./middleware/errors.js";
 import webhooks from "./modules/webhooks.js";
 import internal from "./modules/internal.js";
@@ -21,7 +22,11 @@ import store from "./modules/store.js";
 import platform from "./modules/platform.js";
 
 /** Storefront requests come via the SSR proxy, which forwards the shopper's IP in x-shopper-ip. */
-const clientIp = (req: express.Request) => ipKeyGenerator(req.header("x-shopper-ip") ?? req.ip ?? "unknown");
+// x-shopper-ip is only trusted when the request carries the storefront's internal secret;
+// otherwise anyone calling the API directly could pick their own rate-limit bucket.
+const fromStorefront = (req: express.Request) => timingSafeEqualStr(req.header("x-internal-secret") ?? "", env.INTERNAL_PROXY_SECRET);
+const clientIp = (req: express.Request) =>
+  ipKeyGenerator((fromStorefront(req) ? req.header("x-shopper-ip") : undefined) || req.ip || "unknown");
 
 export function createApp() {
   const app = express();

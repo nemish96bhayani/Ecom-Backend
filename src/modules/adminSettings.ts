@@ -3,7 +3,7 @@ import dns from "node:dns/promises";
 import { moduleFor } from "./_shared.js";
 import { Tenant, Domain, AuditLog } from "../models/platform.js";
 import { Statement, Commission } from "../models/billing.js";
-import { idParams } from "../http/route.js";
+import { idParams, objectId } from "../http/route.js";
 import { notFound, badRequest, conflict } from "../lib/errors.js";
 import { requireTenantId, runWithoutTenant } from "../db/tenantContext.js";
 import { randomToken, encryptSecret } from "../lib/crypto.js";
@@ -36,7 +36,7 @@ const settingsBody = z.object({
     whatsappNumber: z.string(),
     social: z.object({ instagram: z.string(), facebook: z.string(), youtube: z.string() }).partial(),
     seo: z.object({ title: z.string(), description: z.string() }).partial(),
-    checkout: z.object({ codEnabled: z.boolean(), codMaxPaise: z.number().int(), prepaidDiscountPaise: z.number().int().min(0), freeShippingAbovePaise: z.number().int().min(0), flatShippingPaise: z.number().int().min(0), codFeePaise: z.number().int().min(0) }).partial(),
+    checkout: z.object({ codEnabled: z.boolean(), codMaxPaise: z.number().int().min(0), prepaidDiscountPaise: z.number().int().min(0), freeShippingAbovePaise: z.number().int().min(0), flatShippingPaise: z.number().int().min(0), codFeePaise: z.number().int().min(0) }).partial(),
     shippingOrigin: z.object({ pickupLocation: z.string(), pincode: z.string(), defaultWeightKg: z.number().positive(), dims: z.object({ l: z.number(), b: z.number(), h: z.number() }) }).partial(),
     tracking: z.object({ metaPixelId: z.string(), ga4Id: z.string(), googleAdsId: z.string() }).partial(),
   }).partial().optional(),
@@ -281,7 +281,7 @@ add({
 
 add({
   method: "get", path: "/billing/commissions", summary: "Commission line items", auth: "owner",
-  query: z.object({ status: z.enum(["accrued", "reversed", "billed"]).optional(), statementId: z.string().optional() }),
+  query: z.object({ status: z.enum(["accrued", "reversed", "billed"]).optional(), statementId: objectId.optional() }),
   handler: ({ query }) => Commission.find({ ...(query.status ? { status: query.status } : {}), ...(query.statementId ? { statementId: query.statementId } : {}) }).sort({ accruedAt: -1 }).limit(500).lean(),
 });
 

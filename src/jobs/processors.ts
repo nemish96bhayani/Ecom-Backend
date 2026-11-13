@@ -4,6 +4,7 @@ import { Order } from "../models/orders.js";
 import { Tenant, Domain } from "../models/platform.js";
 import { Statement } from "../models/billing.js";
 import { sendEmail, sendMessage } from "../integrations/notifications/index.js";
+import { collectStatement } from "../integrations/billing/mandates.js";
 import { sendMetaPurchase } from "../integrations/ads/meta.js";
 import { decryptSecret } from "../lib/crypto.js";
 import { formatINR } from "../lib/money.js";
@@ -81,7 +82,16 @@ export async function monthlyBilling() {
 export async function dunning() {
   const due = await runWithoutTenant("dunning", () => Statement.find({ status: "due", dueDate: { $lt: new Date() } }).lean());
   for (const s of due) {
-    await runWithoutTenant("dunning", () => Statement.updateOne({ _id: s._id }, { $set: { status: "overdue" }, $push: { attempts: { at: new Date(), result: "overdue" } } }));
+    // Try the merchant's auto-debit mandate first (no-op until a mandate provider is configured).
+    const r = await collectStatement({ id: String(s._id), tenantId: String(s.tenantId), invoiceNumber: s.invoiceNumber, totalPaise: s.totalPaise ?? 0 });
+    if (r.status === "collected") {
+      await runWithoutTenant("dunning", () =>
+        Statement.updateOne({ _id: s._id }, { $set: { status: "paid", paidAt: new Date(), paymentRef: r.reference }, $push: { attempts: { at: new Date(), result: "paid", note: r.reference } } }),
+      );
+      continue;
+    }
+    const note = r.status === "failed" ? `auto-debit failed: ${r.reason}` : undefined;
+    await runWithoutTenant("dunning", () => Statement.updateOne({ _id: s._id }, { $set: { status: "overdue" }, $push: { attempts: { at: new Date(), result: "overdue", note } } }));
     const t = await runWithoutTenant("dunning", () => Tenant.findById(s.tenantId).lean());
     if (t?.business?.email) await sendEmail(t.business.email, `Invoice ${s.invoiceNumber} is overdue`, `<p>Your platform invoice ${s.invoiceNumber} for ${formatINR(s.totalPaise ?? 0)} is overdue. Pay it to avoid interruption of services.</p>`);
   }
@@ -91,6 +101,8 @@ export async function dunning() {
 export async function domainHealth() {
   const domains = await runWithoutTenant("domain-health", () => Domain.find({ kind: "custom", status: { $in: ["active", "error"] } }).lean());
   for (const d of domains) {
+    // Skip local/dev hostnames: they have no public DNS and would always flip to "error".
+    if (/(^|\.)localhost$|\.test$|\.local$|^127\./i.test(d.hostname)) continue;
     let ok = false;
     try {
       const cname = await dns.resolveCname(d.hostname).catch(() => [] as string[]);

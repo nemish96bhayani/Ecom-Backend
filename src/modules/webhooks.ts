@@ -40,9 +40,9 @@ router.post("/api/v1/webhooks/payments/:provider/:tenantId", raw, async (req, re
     if (!(await firstTime(provider.name, evt.eventKey, tenantId, body))) return res.status(200).json({ duplicate: true });
 
     await runAsTenant(tenantId, async () => {
-      const order = await Order.findOne({ "payment.providerOrderId": evt.providerOrderId });
+      const order = await Order.findOne({ "payment.providerOrderId": String(evt.providerOrderId) });
       if (!order) return logger.warn({ tenantId, evt }, "Webhook for unknown order");
-      if (evt.status === "paid") await markOrderPaid(String(order._id), evt.paymentId);
+      if (evt.status === "paid") await markOrderPaid(String(order._id), evt.paymentId, evt.amountPaise);
       else if (evt.status === "failed" && order.status === "pending_payment") {
         order.payment!.status = "failed";
         await order.save();
@@ -67,7 +67,7 @@ router.post("/api/v1/webhooks/shipping/:provider/:tenantId", express.json({ limi
     if (!(await firstTime(provider.name, `${provider.name}:${evt.awb}:${evt.status}:${evt.at.toISOString()}`, tenantId, req.body))) return res.json({ duplicate: true });
 
     await runAsTenant(tenantId, async () => {
-      const order = await Order.findOne({ "shipment.awb": evt.awb });
+      const order = await Order.findOne({ "shipment.awb": String(evt.awb) });
       if (!order) return;
       order.shipment!.status = evt.status;
       order.shipment!.events.push({ status: evt.status, location: evt.location, at: evt.at });

@@ -1,11 +1,13 @@
 import { z } from "zod";
 import { Types } from "mongoose";
-import { moduleFor, escapeRegex } from "./_shared.js";
+import { moduleFor, escapeRegex, queryDateFrom, queryDateTo } from "./_shared.js";
 import { Order, ORDER_STATUSES, type OrderStatus } from "../models/orders.js";
 import { Customer } from "../models/people.js";
 import { Tenant } from "../models/platform.js";
+import { Commission } from "../models/billing.js";
+import { env } from "../config/env.js";
 import { idParams, pagination } from "../http/route.js";
-import { notFound, badRequest } from "../lib/errors.js";
+import { notFound, badRequest, conflict } from "../lib/errors.js";
 import { requireTenantId } from "../db/tenantContext.js";
 import { transitionOrder, refundOrder } from "../services/orders.js";
 import { getShippingProvider } from "../integrations/shipping/index.js";
@@ -16,7 +18,7 @@ export default router;
 
 add({
   method: "get", path: "/orders", summary: "List orders", auth: "merchant",
-  query: pagination.extend({ status: z.enum(ORDER_STATUSES).optional(), q: z.string().optional(), method: z.enum(["online", "cod"]).optional(), from: z.coerce.date().optional(), to: z.coerce.date().optional() }),
+  query: pagination.extend({ status: z.enum(ORDER_STATUSES).optional(), q: z.string().optional(), method: z.enum(["online", "cod"]).optional(), from: queryDateFrom.optional(), to: queryDateTo.optional() }),
   handler: async ({ query }) => {
     const f: any = {};
     if (query.status) f.status = query.status;
@@ -27,7 +29,7 @@ add({
     }
     if (query.from || query.to) f.createdAt = { ...(query.from ? { $gte: query.from } : {}), ...(query.to ? { $lte: query.to } : {}) };
     const [items, total] = await Promise.all([
-      Order.find(f).sort({ createdAt: -1 }).skip((query.page - 1) * query.limit).limit(query.limit).select("number customer status totals payment.method payment.status shipment.awb createdAt").lean(),
+      Order.find(f).sort({ createdAt: -1, _id: -1 }).skip((query.page - 1) * query.limit).limit(query.limit).select("number customer status totals payment.method payment.status shipment.awb createdAt").lean(),
       Order.countDocuments(f),
     ]);
     return { items, total, page: query.page, limit: query.limit };
@@ -48,13 +50,17 @@ add({
 
 add({
   method: "post", path: "/orders/:id/status", summary: "Change order status", auth: "merchant", params: idParams,
-  body: z.object({ status: z.enum(ORDER_STATUSES), note: z.string().optional() }),
-  handler: ({ params, body, req }) => transitionOrder(params.id, body.status as OrderStatus, { by: `user:${req.auth!.sub}`, note: body.note }),
+  body: z.object({ status: z.enum(ORDER_STATUSES), note: z.string().max(1000).optional() }),
+  handler: ({ params, body, req }) => {
+    // "refunded" only through the owner-only refund endpoint, which actually returns the money and adjusts commission.
+    if (body.status === "refunded") throw badRequest("Use Refund to refund an order. It returns the money and records it.");
+    return transitionOrder(params.id, body.status as OrderStatus, { by: `user:${req.auth!.sub}`, note: body.note });
+  },
 });
 
 add({
   method: "post", path: "/orders/:id/refund", summary: "Refund an order (full or partial)", auth: "owner", params: idParams,
-  body: z.object({ amountPaise: z.number().int().positive().optional(), reason: z.string().min(2) }),
+  body: z.object({ amountPaise: z.number().int().positive().optional(), reason: z.string().trim().min(2).max(500) }),
   handler: ({ params, body, req }) => refundOrder(params.id, body.amountPaise, body.reason, `user:${req.auth!.sub}`),
 });
 
@@ -70,26 +76,46 @@ add({
     const tenant = await Tenant.findById(tenantId).lean();
     const origin = tenant?.settings?.shippingOrigin;
     if (!origin?.pickupLocation) throw badRequest("Set your pickup location in Settings → Shipping first");
-    const provider = await getShippingProvider(tenantId);
+    // Claim a booking lock first so a double click can't book two shipments (a stale lock expires after 2 minutes).
+    const locked = await Order.findOneAndUpdate(
+      {
+        _id: order._id,
+        status: { $in: ["confirmed", "packed"] },
+        "shipment.awb": { $in: [null, ""] },
+        $or: [{ shipmentLockAt: null }, { shipmentLockAt: { $lt: new Date(Date.now() - 2 * 60_000) } }],
+      },
+      { $set: { shipmentLockAt: new Date() } },
+      { new: true },
+    );
+    if (!locked) throw conflict("A shipment is already being created for this order. Wait a moment and reload.");
     const weight = body.weightKg ?? order.items.reduce((s, i) => s + (i.weightKg ?? origin.defaultWeightKg ?? 0.5) * (i.quantity ?? 1), 0);
     const a = order.shippingAddress!;
-    const r = await provider.createShipment({
-      orderNumber: order.number,
-      orderDate: order.createdAt as Date,
-      paymentMethod: order.payment!.method as "online" | "cod",
-      totalPaise: order.totals!.totalPaise!,
-      subtotalPaise: order.totals!.totalPaise!,
-      customer: { name: order.customer!.name!, phone: order.customer!.phone!, email: order.customer?.email ?? undefined },
-      address: { line1: a.line1!, line2: a.line2 ?? undefined, city: a.city!, state: a.state!, pincode: a.pincode! },
-      items: order.items.map((i) => ({ name: i.title!, sku: i.sku!, units: i.quantity!, sellingPricePaise: i.unitPricePaise!, hsn: i.hsn ?? undefined })),
-      weightKg: Math.max(0.1, Math.round(weight * 100) / 100),
-      dims: body.dims ?? { l: origin.dims?.l ?? 20, b: origin.dims?.b ?? 15, h: origin.dims?.h ?? 5 },
-      pickupLocation: origin.pickupLocation,
-    });
+    let provider: Awaited<ReturnType<typeof getShippingProvider>>;
+    let r: Awaited<ReturnType<typeof provider.createShipment>>;
+    try {
+      provider = await getShippingProvider(tenantId);
+      r = await provider.createShipment({
+        orderNumber: order.number,
+        orderDate: order.createdAt as Date,
+        paymentMethod: order.payment!.method as "online" | "cod",
+        totalPaise: order.totals!.totalPaise!,
+        subtotalPaise: order.totals!.subtotalPaise ?? order.totals!.totalPaise!,
+        customer: { name: order.customer!.name!, phone: order.customer!.phone!, email: order.customer?.email ?? undefined },
+        address: { line1: a.line1!, line2: a.line2 ?? undefined, city: a.city!, state: a.state!, pincode: a.pincode! },
+        items: order.items.map((i) => ({ name: i.title!, sku: i.sku!, units: i.quantity!, sellingPricePaise: i.unitPricePaise!, hsn: i.hsn ?? undefined })),
+        weightKg: Math.max(0.1, Math.round(weight * 100) / 100),
+        dims: body.dims ?? { l: origin.dims?.l ?? 20, b: origin.dims?.b ?? 15, h: origin.dims?.h ?? 5 },
+        pickupLocation: origin.pickupLocation,
+      });
+    } catch (err) {
+      await Order.updateOne({ _id: order._id }, { $unset: { shipmentLockAt: 1 } });
+      throw err;
+    }
     const labelUrl = (r.labelUrl && !r.labelUrl.includes("example.com")) ? r.labelUrl : `/api/v1/admin/orders/${order._id}/label.pdf`;
-    order.shipment = { provider: provider.name, providerOrderId: r.providerOrderId, shipmentId: r.shipmentId, awb: r.awb, courier: r.courier, labelUrl, trackingUrl: r.trackingUrl, status: "created", events: [] } as any;
-    await order.save();
-    if (order.status === "confirmed") await transitionOrder(params.id, "packed", { by: `user:${req.auth!.sub}`, note: "Shipment created" });
+    locked.shipment = { provider: provider.name, providerOrderId: r.providerOrderId, shipmentId: r.shipmentId, awb: r.awb, courier: r.courier, labelUrl, trackingUrl: r.trackingUrl, status: "created", events: [] } as any;
+    locked.shipmentLockAt = undefined;
+    await locked.save();
+    if (locked.status === "confirmed") await transitionOrder(params.id, "packed", { by: `user:${req.auth!.sub}`, note: "Shipment created" });
     return Order.findById(params.id).lean();
   },
 });
@@ -158,7 +184,7 @@ add({
       f.$or = [{ phone: rx }, { name: rx }, { email: rx }];
     }
     const [items, total] = await Promise.all([
-      Customer.find(f).sort({ lastOrderAt: -1, createdAt: -1 }).skip((query.page - 1) * query.limit).limit(query.limit).lean(),
+      Customer.find(f).sort({ lastOrderAt: -1, createdAt: -1, _id: -1 }).skip((query.page - 1) * query.limit).limit(query.limit).lean(),
       Customer.countDocuments(f),
     ]);
     return { items, total, page: query.page, limit: query.limit };
@@ -178,8 +204,8 @@ add({
 const dashboardQuery = z.object({
   days: z.coerce.number().int().min(1).max(365).optional(),
   period: z.enum(["today", "yesterday", "7d", "14d", "30d", "90d", "custom"]).default("30d"),
-  from: z.coerce.date().optional(),
-  to: z.coerce.date().optional(),
+  from: queryDateFrom.optional(),
+  to: queryDateTo.optional(),
   paymentMethod: z.enum(["all", "online", "cod"]).default("all"),
 });
 
@@ -245,6 +271,7 @@ add({
       codCollected,
       codPending,
       packedCount,
+      commissionAgg,
     ] = await Promise.all([
       // 1. Time Series Daily Aggregation (Selling & Returns)
       Order.aggregate([
@@ -430,6 +457,12 @@ add({
 
       // 24. Action: Ready to Ship (Packed)
       Order.countDocuments({ status: "packed" }),
+
+      // 25. Platform commission accrued on orders in the period (real rate and base, not a flat 3% of gross)
+      Commission.aggregate([
+        { $match: { status: { $in: ["accrued", "billed"] }, accruedAt: { $gte: since, $lte: until } } },
+        { $group: { _id: null, total: { $sum: "$amountPaise" } } },
+      ]),
     ]);
 
     const grossSalesPaise = series.reduce((s, x) => s + x.grossSalesPaise, 0);
@@ -442,11 +475,13 @@ add({
     const totalReturns = custReturnsCount + rtoCountVal;
     const returnRatePercent = totalOrders > 0 ? Math.round((totalReturns / totalOrders) * 1000) / 10 : 0;
 
-    const onlineSettledPaise = onlineSettled[0]?.total ?? Math.round(grossSalesPaise * 0.45);
-    const onlineInFlightPaise = onlineInFlight[0]?.total ?? Math.round(grossSalesPaise * 0.15);
-    const codCollectedPaise = codCollected[0]?.total ?? Math.round(grossSalesPaise * 0.25);
-    const codPendingRemittancePaise = codPending[0]?.total ?? Math.round(grossSalesPaise * 0.15);
-    const platformFeeEstimatedPaise = Math.round(grossSalesPaise * 0.03 * 1.18); // 3% + 18% GST
+    // Real aggregates only: 0 when there is nothing recorded (these used to fall back to invented shares of gross sales).
+    const onlineSettledPaise = onlineSettled[0]?.total ?? 0;
+    const onlineInFlightPaise = onlineInFlight[0]?.total ?? 0;
+    const codCollectedPaise = codCollected[0]?.total ?? 0;
+    const codPendingRemittancePaise = codPending[0]?.total ?? 0;
+    const commissionPaise = commissionAgg[0]?.total ?? 0;
+    const platformFeeEstimatedPaise = commissionPaise + Math.round((commissionPaise * env.COMMISSION_GST_PERCENT) / 100); // commission + GST
 
     // Next Tuesday / Friday payout cycle date
     const nextPayoutDate = new Date();

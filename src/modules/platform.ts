@@ -4,21 +4,31 @@ import { Types } from "mongoose";
 import { moduleFor, slugify } from "./_shared.js";
 import { Tenant, Domain, AuditLog, PlatformAdmin } from "../models/platform.js";
 import { User, Cart } from "../models/people.js";
+import { Category, Product, Coupon, Page } from "../models/catalog.js";
 import { Order } from "../models/orders.js";
 import { Statement, Commission } from "../models/billing.js";
-import { idParams, pagination } from "../http/route.js";
-import { notFound, badRequest } from "../lib/errors.js";
+import { idParams, objectId, pagination } from "../http/route.js";
+import { notFound, badRequest, conflict } from "../lib/errors.js";
 import { env } from "../config/env.js";
 import { encryptSecret, randomToken } from "../lib/crypto.js";
 import { runAsTenant } from "../db/tenantContext.js";
 import { invalidateTenantCaches } from "../services/tenantLookup.js";
-import { generateAllStatements, generateStatement, previousPeriod, statementPdf } from "../services/statements.js";
+import { generateAllStatements, generateStatement, previousPeriod, statementPdf, periodRange, currentPeriod, closedPeriodError } from "../services/statements.js";
 import { BLUEPRINTS, applyBlueprint, type BlueprintKey } from "../services/blueprints.js";
 
 const { router, add } = moduleFor("Platform", "/api/v1/platform");
 export default router;
 
 const audit = (actor: string, action: string, tenantId?: any, meta?: unknown) => AuditLog.create({ actor, action, tenantId, meta });
+
+/** Store subdomains: a single DNS label (letters, digits, inner hyphens, at most 63 characters). */
+export const tenantSlug = z
+  .string()
+  .min(2)
+  .max(63)
+  .regex(/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/, "Lowercase letters, numbers and dashes only, not starting or ending with a dash");
+const RESERVED_SLUGS = new Set(["www", "admin", "api", "stores", "app", "mail", "platform", "localhost", "static", "cdn", "assets", "status", "help", "support", "billing"]);
+export const isReservedSlug = (slug: string) => RESERVED_SLUGS.has(slug);
 
 add({
   method: "get", path: "/tenants", summary: "All stores with this month's numbers", auth: "platform",
@@ -27,7 +37,7 @@ add({
     const f = query.status ? { status: query.status } : {};
     const tenants = await Tenant.find(f).sort({ createdAt: -1 }).skip((query.page - 1) * query.limit).limit(query.limit).lean();
     const ids = tenants.map((t) => t._id);
-    const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+    const monthStart = periodRange(currentPeriod()).start; // IST month, matching billing
     const [gmv, domains] = await Promise.all([
       Order.aggregate([
         { $match: { tenantId: { $in: ids }, createdAt: { $gte: monthStart }, status: { $in: ["confirmed", "packed", "shipped", "delivered"] } } },
@@ -52,7 +62,7 @@ add({
   method: "post", path: "/tenants", summary: "Create a store, its subdomain and owner account", auth: "platform",
   body: z.object({
     name: z.string().min(2),
-    slug: z.string().min(2).max(40).regex(/^[a-z0-9-]+$/, "Lowercase letters, numbers and dashes only"),
+    slug: tenantSlug,
     owner: z.object({ email: z.email(), name: z.string().min(1), password: z.string().min(10) }),
     commissionRatePercent: z.number().min(0).max(30).default(env.COMMISSION_RATE_PERCENT),
     monthlyFeePaise: z.number().int().min(0).default(0),
@@ -62,7 +72,7 @@ add({
   }),
   handler: async ({ body, req }) => {
     const slug = slugify(body.slug);
-    if (["www", "admin", "api", "stores", "app", "mail"].includes(slug)) throw badRequest("That subdomain is reserved");
+    if (isReservedSlug(slug)) throw badRequest("That subdomain is reserved");
     const tenant = await Tenant.create({
       name: body.name,
       slug,
@@ -84,6 +94,10 @@ add({
         await applyBlueprint(String(tenant._id), body.blueprint as BlueprintKey);
       }
     } catch (e) {
+      // Also remove whatever the blueprint managed to seed, scoped to this new tenant only.
+      await runAsTenant(String(tenant._id), () =>
+        Promise.all([Category.deleteMany({}), Product.deleteMany({}), Coupon.deleteMany({}), Page.deleteMany({})]),
+      ).catch(() => undefined);
       await Promise.all([Tenant.deleteOne({ _id: tenant._id }), Domain.deleteMany({ tenantId: tenant._id }), User.deleteMany({ tenantId: tenant._id })]);
       throw e;
     }
@@ -139,9 +153,10 @@ add({
   method: "get", path: "/dashboard", summary: "Platform totals: GMV, commission, overdue", auth: "platform",
   query: z.object({ months: z.coerce.number().int().min(1).max(24).default(6) }),
   handler: async ({ query }) => {
-    const since = new Date();
-    since.setMonth(since.getMonth() - query.months + 1, 1);
-    since.setHours(0, 0, 0, 0);
+    // Start of the IST month (months - 1) before the current one, matching the Asia/Kolkata buckets below.
+    const [cy, cm] = currentPeriod().split("-").map(Number) as [number, number];
+    const first = new Date(Date.UTC(cy, cm - query.months, 1));
+    const since = periodRange(`${first.getUTCFullYear()}-${String(first.getUTCMonth() + 1).padStart(2, "0")}`).start;
     const [byMonth, byTenant, overdue, accrued, tenants] = await Promise.all([
       Order.aggregate([
         { $match: { createdAt: { $gte: since }, status: { $in: ["confirmed", "packed", "shipped", "delivered"] } } },
@@ -178,13 +193,22 @@ add({
 
 add({
   method: "post", path: "/statements/generate", summary: "Generate statements for a month (default: last month)", auth: "platform",
-  body: z.object({ period: z.string().regex(/^\d{4}-\d{2}$/).optional(), tenantId: z.string().optional() }),
+  body: z.object({ period: z.string().regex(/^\d{4}-\d{2}$/).optional(), tenantId: objectId.optional() }),
   handler: async ({ body, req }) => {
     const period = body.period ?? previousPeriod();
-    if (body.tenantId) await generateStatement(body.tenantId, period);
-    else await generateAllStatements(period);
-    await audit(`platform:${req.auth!.sub}`, "statements.generated", body.tenantId, { period });
-    return { period };
+    // A month that hasn't ended would strand commission accrued later in it (generation is once per period).
+    const problem = closedPeriodError(period);
+    if (problem) throw badRequest(problem);
+    let created: boolean;
+    if (body.tenantId) {
+      const existed = await Statement.exists({ tenantId: body.tenantId, period });
+      const s = await generateStatement(body.tenantId, period);
+      created = !!s && !existed;
+    } else {
+      created = (await generateAllStatements(period)) > 0;
+    }
+    await audit(`platform:${req.auth!.sub}`, "statements.generated", body.tenantId, { period, created });
+    return { period, created };
   },
 });
 
@@ -192,8 +216,16 @@ add({
   method: "post", path: "/statements/:id/mark-paid", summary: "Record a payment against a statement", auth: "platform", params: idParams,
   body: z.object({ paymentRef: z.string().min(2) }),
   handler: async ({ params, body, req }) => {
-    const s = await Statement.findByIdAndUpdate(params.id, { $set: { status: "paid", paidAt: new Date(), paymentRef: body.paymentRef }, $push: { attempts: { at: new Date(), result: "paid", note: body.paymentRef } } }, { new: true }).lean();
-    if (!s) throw notFound("Statement");
+    const s = await Statement.findOneAndUpdate(
+      { _id: params.id, status: { $in: ["due", "overdue"] } },
+      { $set: { status: "paid", paidAt: new Date(), paymentRef: body.paymentRef }, $push: { attempts: { at: new Date(), result: "paid", note: body.paymentRef } } },
+      { new: true },
+    ).lean();
+    if (!s) {
+      const current = await Statement.findById(params.id).select("status").lean();
+      if (!current) throw notFound("Statement");
+      throw conflict(`This statement is already ${current.status}`);
+    }
     await audit(`platform:${req.auth!.sub}`, "statement.paid", s.tenantId, { statementId: s._id, ref: body.paymentRef });
     return s;
   },
@@ -205,6 +237,7 @@ add({
     const s = await Statement.findById(params.id).lean();
     if (!s) throw notFound("Statement");
     const pdf = await statementPdf(String(s.tenantId), params.id);
+    if (!pdf) throw notFound("Store for this statement");
     res.type("application/pdf").send(pdf);
   },
 });

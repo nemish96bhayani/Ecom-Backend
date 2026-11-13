@@ -35,7 +35,7 @@ export class RazorpayProvider implements PaymentProvider {
   async fetchStatus(providerOrderId: string) {
     const r = await this.call<any>(`/orders/${providerOrderId}/payments`, "GET");
     const captured = (r.items ?? []).find((p: any) => p.status === "captured");
-    if (captured) return { status: "paid" as const, paymentId: captured.id };
+    if (captured) return { status: "paid" as const, paymentId: captured.id, amountPaise: typeof captured.amount === "number" ? captured.amount : undefined };
     const failed = (r.items ?? []).length > 0 && (r.items ?? []).every((p: any) => p.status === "failed");
     return { status: failed ? ("failed" as const) : ("pending" as const) };
   }
@@ -68,6 +68,6 @@ export class RazorpayProvider implements PaymentProvider {
     if (!orderId) return null;
     const ev: string = body.event ?? "";
     const status = ev === "payment.captured" || ev === "order.paid" ? "paid" : ev === "payment.failed" ? "failed" : ev.startsWith("refund") ? "refunded" : "pending";
-    return { providerOrderId: orderId, status, paymentId: p?.id, eventKey: `razorpay:${ev}:${p?.id ?? orderId}` } as const;
+    return { providerOrderId: orderId, status, paymentId: p?.id, amountPaise: typeof p?.amount === "number" ? p.amount : undefined, eventKey: `razorpay:${ev}:${p?.id ?? orderId}` } as const;
   }
 }

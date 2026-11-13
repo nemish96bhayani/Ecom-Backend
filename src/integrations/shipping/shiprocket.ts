@@ -69,7 +69,9 @@ export class ShiprocketProvider implements ShippingProvider {
       shipping_is_billing: true,
       order_items: i.items.map((it) => ({ name: it.name, sku: it.sku, units: it.units, selling_price: it.sellingPricePaise / 100, hsn: it.hsn ?? "" })),
       payment_method: i.paymentMethod === "cod" ? "COD" : "Prepaid",
-      sub_total: i.subtotalPaise / 100,
+      // Shiprocket collects sub_total on COD and we send no separate shipping/COD-fee/discount lines,
+      // so this must be the order total the shopper pays (not the merchandise subtotal).
+      sub_total: i.totalPaise / 100,
       length: i.dims.l,
       breadth: i.dims.b,
       height: i.dims.h,

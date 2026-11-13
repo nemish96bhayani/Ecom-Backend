@@ -1,10 +1,10 @@
 import { z } from "zod";
-import { moduleFor } from "./_shared.js";
+import { moduleFor, sentKeys, escapeRegex, queryDateFrom, queryDateTo, clearableDate } from "./_shared.js";
 import { AdAccount, Campaign } from "../models/billing.js";
 import { Order } from "../models/orders.js";
 import { Tenant } from "../models/platform.js";
 import { idParams } from "../http/route.js";
-import { notFound } from "../lib/errors.js";
+import { notFound, conflict } from "../lib/errors.js";
 import { requireTenantId } from "../db/tenantContext.js";
 import { env } from "../config/env.js";
 import { feedToken } from "./feeds.js";
@@ -22,24 +22,39 @@ add({ method: "delete", path: "/accounts/:id", summary: "Remove ad account", aut
 
 const campaignBody = z.object({
   platform: z.enum(["meta", "google", "other"]),
-  name: z.string().min(1),
-  utmCampaign: z.string().regex(/^[a-z0-9_-]+$/i, "Use letters, numbers, - or _"),
+  name: z.string().trim().min(1).max(200),
+  utmCampaign: z.string().max(100).regex(/^[a-z0-9_-]+$/i, "Use letters, numbers, - or _"),
   status: z.enum(["draft", "active", "paused", "ended"]).default("active"),
-  startDate: z.coerce.date().optional(),
-  endDate: z.coerce.date().optional(),
+  startDate: clearableDate.optional(),
+  endDate: clearableDate.optional(),
   budgetPaise: z.number().int().min(0).optional(),
-  notes: z.string().optional(),
+  notes: z.string().max(5000).optional(),
 });
 
+/** Orders are matched to campaigns by utm_campaign ignoring case, so two campaigns can't differ only by case. */
+async function assertUtmFree(utmCampaign: string, exceptId?: string) {
+  const clash = await Campaign.findOne({ utmCampaign: new RegExp(`^${escapeRegex(utmCampaign)}$`, "i"), ...(exceptId ? { _id: { $ne: exceptId } } : {}) }).lean();
+  if (clash) throw conflict(`Campaign "${clash.name}" already uses utm_campaign "${clash.utmCampaign}"`);
+}
+
 add({ method: "get", path: "/campaigns", summary: "List campaigns", auth: "merchant", handler: () => Campaign.find().sort({ createdAt: -1 }).lean() });
-add({ method: "post", path: "/campaigns", summary: "Create campaign", auth: "merchant", body: campaignBody, handler: ({ body }) => Campaign.create(body) });
+add({ method: "post", path: "/campaigns", summary: "Create campaign", auth: "merchant", body: campaignBody,
+  handler: async ({ body }) => {
+    await assertUtmFree(body.utmCampaign);
+    return Campaign.create(body);
+  },
+});
 add({
   method: "patch", path: "/campaigns/:id", summary: "Update campaign", auth: "merchant", params: idParams, body: campaignBody.partial(),
-  handler: async ({ params, body }) => (await Campaign.findByIdAndUpdate(params.id, { $set: body }, { new: true }).lean()) ?? Promise.reject(notFound("Campaign")),
+  handler: async ({ params, body, req }) => {
+    const patch = sentKeys(body, req.body);
+    if (patch.utmCampaign) await assertUtmFree(patch.utmCampaign, params.id);
+    return (await Campaign.findByIdAndUpdate(params.id, { $set: patch }, { new: true }).lean()) ?? Promise.reject(notFound("Campaign"));
+  },
 });
 add({
   method: "post", path: "/campaigns/:id/spend", summary: "Add daily spend (manual entry or import)", auth: "merchant", params: idParams,
-  body: z.object({ entries: z.array(z.object({ date: z.coerce.date(), amountPaise: z.number().int().min(0), impressions: z.number().int().min(0).optional(), clicks: z.number().int().min(0).optional() })).min(1) }),
+  body: z.object({ entries: z.array(z.object({ date: z.coerce.date(), amountPaise: z.number().int().min(0), impressions: z.number().int().min(0).optional(), clicks: z.number().int().min(0).optional() })).min(1).max(400) }),
   handler: async ({ params, body }) => {
     const c = await Campaign.findById(params.id);
     if (!c) throw notFound("Campaign");
@@ -57,7 +72,7 @@ add({
 /** Campaign performance: spend from entries, orders/revenue matched by utm_campaign. */
 add({
   method: "get", path: "/report", summary: "Campaign performance (spend, orders, revenue, ROAS)", auth: "merchant",
-  query: z.object({ from: z.coerce.date().optional(), to: z.coerce.date().optional() }),
+  query: z.object({ from: queryDateFrom.optional(), to: queryDateTo.optional() }),
   handler: async ({ query }) => {
     const from = query.from ?? new Date(Date.now() - 30 * 86_400_000);
     const to = query.to ?? new Date();

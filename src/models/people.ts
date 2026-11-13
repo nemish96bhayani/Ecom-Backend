@@ -12,6 +12,9 @@ const userSchema = new Schema(
     isActive: { type: Boolean, default: true },
     authVersion: { type: Number, default: 0 },
     lastLoginAt: Date,
+    // Password reset: only a hash of the emailed token is stored, and it expires.
+    resetTokenHash: { type: String, select: false, default: null },
+    resetExpiresAt: { type: Date, select: false, default: null },
   },
   { timestamps: true },
 );
@@ -74,4 +77,16 @@ cartSchema.plugin(tenantPlugin);
 cartSchema.index({ tenantId: 1, token: 1 }, { unique: true });
 cartSchema.index({ updatedAt: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 30 });
 export const Cart = model("Cart", cartSchema);
+
+// Newsletter subscribers (store updates by email).
+const subscriberSchema = new Schema(
+  {
+    tenantId: tenantIdField,
+    email: { type: String, required: true, lowercase: true, trim: true },
+  },
+  { timestamps: true },
+);
+subscriberSchema.plugin(tenantPlugin);
+subscriberSchema.index({ tenantId: 1, email: 1 }, { unique: true });
+export const Subscriber = model("Subscriber", subscriberSchema);
 export { addressSchema };

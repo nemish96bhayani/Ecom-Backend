@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22.22"
+    "node": ">=24 <25"
   },
   "scripts": {
     "dev": "tsx watch src/server.ts",
@@ -17,6 +17,7 @@
     "test:unit": "vitest run tests/unit",
     "openapi": "tsx scripts/generate-openapi.ts",
     "seed": "tsx scripts/seed.ts",
+    "seed:sorath": "tsx scripts/seed-sorath.ts",
     "lint": "eslint src",
     "format": "prettier --write ."
   },

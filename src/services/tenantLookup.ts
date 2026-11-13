@@ -10,7 +10,7 @@ export const normalizeHost = (host: string) => host.toLowerCase().trim().replace
 export async function resolveTenantByHost(rawHost: string): Promise<ResolvedTenant | null> {
   const hostname = normalizeHost(rawHost);
   return cached(`host:${hostname}`, 300, async () => {
-    let domain = await Domain.findOne({ hostname, status: { $in: ["verified", "active"] } }).lean();
+    const domain = await Domain.findOne({ hostname, status: { $in: ["verified", "active"] } }).lean();
     if (!domain) {
       // In local development or subdomain fallback: check if hostname matches <slug>.localhost or <slug>.<PLATFORM_DOMAIN>
       const match = hostname.match(/^([a-z0-9-]+)\.localhost$/) ?? (env.PLATFORM_DOMAIN ? hostname.match(new RegExp(`^([a-z0-9-]+)\\.${env.PLATFORM_DOMAIN.replace(/\./g, "\\.")}$`)) : null);

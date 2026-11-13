@@ -4,6 +4,7 @@ import bcrypt from "bcryptjs";
 import { Tenant } from "../../src/models/platform.js";
 import { User } from "../../src/models/people.js";
 import { randomToken } from "../../src/lib/crypto.js";
+import { runAsTenant } from "../../src/db/tenantContext.js";
 
 describe("Client Handover & Onboarding Lifecycle", () => {
   let tenantId: string;
@@ -24,7 +25,7 @@ describe("Client Handover & Onboarding Lifecycle", () => {
   afterAll(async () => {
     if (mongoose.connection.readyState !== 0 && tenantId) {
       await Tenant.deleteOne({ _id: tenantId });
-      await User.deleteMany({ tenantId });
+      await runAsTenant(tenantId, () => User.deleteMany({ tenantId }));
     }
   });
 
@@ -66,14 +67,16 @@ describe("Client Handover & Onboarding Lifecycle", () => {
     // Create claimed owner
     const clientEmail = `client_${Date.now()}@heritageweaves.in`;
     const passwordHash = await bcrypt.hash("ClientPass!1234", 12);
-    const user = await User.create({
-      tenantId: tenant!._id,
-      name: "Rameshvar Sharma",
-      email: clientEmail,
-      passwordHash,
-      role: "owner",
-      isActive: true,
-    });
+    const user = await runAsTenant(String(tenant!._id), () =>
+      User.create({
+        tenantId: tenant!._id,
+        name: "Rameshvar Sharma",
+        email: clientEmail,
+        passwordHash,
+        role: "owner",
+        isActive: true,
+      }),
+    );
 
     // Mark demo as false and clear token
     tenant!.isDemo = false;
@@ -86,7 +89,7 @@ describe("Client Handover & Onboarding Lifecycle", () => {
     expect((verifiedTenant as any).isDemo).toBe(false);
     expect((verifiedTenant as any).handoverToken).toBeNull();
 
-    const verifiedUser = await User.findById(user._id).lean();
+    const verifiedUser = await runAsTenant(String(tenant!._id), () => User.findById(user._id).lean());
     expect(verifiedUser?.role).toBe("owner");
     expect(verifiedUser?.email).toBe(clientEmail);
   });

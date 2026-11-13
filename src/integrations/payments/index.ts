@@ -24,12 +24,21 @@ export async function getPaymentProvider(tenantId: string): Promise<PaymentProvi
     throw new AppError(409, "payments_not_configured", "Online payments are not set up for this store yet");
   }
   const creds = JSON.parse(decryptSecret(p.secret));
-  if (p.provider === "mock") return new MockPaymentProvider();
+  if (p.provider === "mock") {
+    // The test gateway confirms every payment, so it must never serve a live store.
+    if (env.NODE_ENV === "production" && !(tenant as any)?.isDemo) {
+      throw new AppError(409, "payments_not_configured", "Online payments are not set up for this store yet");
+    }
+    return new MockPaymentProvider();
+  }
   if (p.provider === "cashfree") return new CashfreeProvider(creds, (p.mode as any) ?? "sandbox");
   return new RazorpayProvider(creds);
 }
 
 export async function savePaymentConfig(tenantId: string, cfg: PaymentConfig) {
+  if (cfg.provider === "mock" && env.NODE_ENV === "production") {
+    throw new AppError(400, "mock_not_allowed", "The test payment gateway can't be used in production");
+  }
   await runWithoutTenant("save-payment-credentials", () =>
     Tenant.updateOne(
       { _id: tenantId },

@@ -15,9 +15,10 @@ export type CreatePaymentResult = {
   checkout: Record<string, unknown>;
 };
 
-export type PaymentStatus = { status: "paid" | "pending" | "failed"; paymentId?: string };
+/** amountPaise is what the gateway says was paid; used to refuse confirming an underpaid order. */
+export type PaymentStatus = { status: "paid" | "pending" | "failed"; paymentId?: string; amountPaise?: number };
 
-export type WebhookResult = { providerOrderId: string; status: "paid" | "failed" | "pending" | "refunded"; paymentId?: string; eventKey: string };
+export type WebhookResult = { providerOrderId: string; status: "paid" | "failed" | "pending" | "refunded"; paymentId?: string; eventKey: string; amountPaise?: number };
 
 export interface PaymentProvider {
   readonly name: "cashfree" | "razorpay" | "mock";

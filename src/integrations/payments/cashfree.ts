@@ -59,7 +59,8 @@ export class CashfreeProvider implements PaymentProvider {
   async fetchStatus(providerOrderId: string) {
     const r = await this.call<any>(`/orders/${encodeURIComponent(providerOrderId)}`, { method: "GET" });
     const status = r.order_status === "PAID" ? "paid" : r.order_status === "EXPIRED" || r.order_status === "TERMINATED" ? "failed" : "pending";
-    return { status } as const;
+    const amountPaise = typeof r.order_amount === "number" ? Math.round(r.order_amount * 100) : undefined;
+    return { status: status as "paid" | "pending" | "failed", amountPaise };
   }
 
   async refund(input: Parameters<PaymentProvider["refund"]>[0]) {
@@ -88,6 +89,8 @@ export class CashfreeProvider implements PaymentProvider {
     const type: string = body?.type ?? "";
     const paymentId = body?.data?.payment?.cf_payment_id ? String(body.data.payment.cf_payment_id) : undefined;
     const status = type.includes("SUCCESS") ? "paid" : type.includes("FAILED") || type.includes("DROPPED") ? "failed" : type.includes("REFUND") ? "refunded" : "pending";
-    return { providerOrderId: orderId, status, paymentId, eventKey: `cashfree:${type}:${orderId}:${paymentId ?? ""}` } as const;
+    const paid = body?.data?.payment?.payment_amount;
+    const amountPaise = typeof paid === "number" ? Math.round(paid * 100) : undefined;
+    return { providerOrderId: orderId, status, paymentId, amountPaise, eventKey: `cashfree:${type}:${orderId}:${paymentId ?? ""}` } as const;
   }
 }

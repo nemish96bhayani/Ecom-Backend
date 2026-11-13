@@ -2,22 +2,24 @@ import { z } from "zod";
 import bcrypt from "bcryptjs";
 import crypto from "node:crypto";
 import { Types } from "mongoose";
-import { moduleFor, escapeRegex } from "./_shared.js";
+import { moduleFor, escapeRegex, queryBool } from "./_shared.js";
 import { Category, Product, Page } from "../models/catalog.js";
-import { Cart, Customer, OtpCode } from "../models/people.js";
+import { Cart, Customer, OtpCode, Subscriber } from "../models/people.js";
 import { Order } from "../models/orders.js";
 import { Tenant } from "../models/platform.js";
 import { pagination } from "../http/route.js";
+import { FILTERABLE_ATTRS } from "./catalogAttrs.js";
 import { notFound, badRequest, AppError } from "../lib/errors.js";
 import { requireTenantId } from "../db/tenantContext.js";
 import { signCustomer } from "../lib/jwt.js";
-import { randomToken } from "../lib/crypto.js";
+import { randomToken, timingSafeEqualStr } from "../lib/crypto.js";
 import { cached, redis } from "../lib/redis.js";
 import { buildQuote } from "../services/pricing.js";
 import { placeOrder, markOrderPaid, transitionOrder } from "../services/orders.js";
 import { getPaymentProvider } from "../integrations/payments/index.js";
 import { getShippingProvider } from "../integrations/shipping/index.js";
 import { enqueueNotification } from "../jobs/queues.js";
+import { sendEmail } from "../integrations/notifications/index.js";
 import { orderInvoicePdf, orderShippingLabelPdf } from "../services/statements.js";
 import { env, isProd } from "../config/env.js";
 
@@ -25,7 +27,11 @@ const { router, add } = moduleFor("Storefront", "/api/v1/store");
 export default router;
 
 const phone = z.string().transform((s) => s.replace(/\D/g, "").replace(/^91(?=\d{10}$)/, "")).pipe(z.string().regex(/^[6-9]\d{9}$/, "Enter a valid 10-digit mobile number"));
-const PUBLIC_PRODUCT = "title slug description brand images optionNames variants._id variants.options variants.pricePaise variants.compareAtPaise variants.stock variants.imageUrl categoryIds isFeatured tags seo createdAt";
+const PUBLIC_PRODUCT = "title slug description brand images optionNames variants._id variants.options variants.pricePaise variants.compareAtPaise variants.stock variants.imageUrl categoryIds isFeatured tags attributes seo createdAt";
+
+/** Facet params arrive as CSV (?strap=A,B) or repeated (?strap=A&strap=B); accept both. */
+const splitFacet = (v: string | string[] | undefined) =>
+  (Array.isArray(v) ? v : typeof v === "string" ? v.split(",") : []).map((s) => s.trim()).filter(Boolean);
 
 // ---------- Store config ----------
 add({
@@ -63,23 +69,67 @@ add({
 add({ method: "get", path: "/categories", summary: "Active categories", auth: "internal", handler: () => Category.find({ isActive: true }).sort({ sortOrder: 1, name: 1 }).lean() });
 
 add({
+  method: "post", path: "/subscribe", summary: "Join the newsletter (email updates)", auth: "internal",
+  body: z.object({ email: z.email() }),
+  handler: async ({ body }) => {
+    const tenantId = requireTenantId();
+    const email = body.email.toLowerCase();
+    await Subscriber.updateOne({ email }, { $setOnInsert: { email } }, { upsert: true });
+    const t = await Tenant.findById(tenantId).select("name").lean();
+    const name = t?.name ?? "our store";
+    // Confirmation goes out via the mail service (logged in dev when SMTP isn't configured).
+    await sendEmail(
+      email,
+      `You're subscribed to ${name}`,
+      `<p>Thanks for subscribing to <b>${name}</b>.</p><p>You'll be first to hear about new arrivals, early access to sales and seasonal offers.</p>`,
+    ).catch(() => undefined);
+    return { ok: true };
+  },
+});
+
+add({
   method: "get", path: "/products", summary: "Browse products", auth: "internal",
-  query: pagination.extend({ q: z.string().optional(), category: z.string().optional(), featured: z.coerce.boolean().optional(), sort: z.enum(["new", "price_asc", "price_desc", "relevance"]).default("new") }),
+  query: pagination.extend({
+    q: z.string().optional(),
+    category: z.string().optional(),
+    featured: queryBool.optional(),
+    sort: z.enum(["new", "price_asc", "price_desc", "relevance"]).default("new"),
+    ...Object.fromEntries(FILTERABLE_ATTRS.map((k) => [k, z.union([z.string(), z.array(z.string())]).optional()])),
+  }),
   handler: async ({ query }) => {
-    const f: any = { status: "active" };
-    if (query.category) {
-      const c = await Category.findOne({ slug: query.category }).lean();
-      if (!c) return { items: [], total: 0, page: query.page, limit: query.limit };
-      f.categoryIds = c._id;
+    const q = query as any;
+    // Base filter: category / featured / free-text (drives the facet counts, so multi-select stays usable).
+    const base: any = { status: "active" };
+    if (q.category) {
+      const c = await Category.findOne({ slug: q.category }).lean();
+      if (!c) return { items: [], total: 0, page: q.page, limit: q.limit, facets: {} };
+      base.categoryIds = c._id;
     }
-    if (query.featured) f.isFeatured = true;
-    if (query.q) f.$or = [{ title: new RegExp(escapeRegex(query.q), "i") }, { tags: new RegExp(`^${escapeRegex(query.q)}`, "i") }];
-    const sort: any = query.sort === "price_asc" ? { "variants.0.pricePaise": 1 } : query.sort === "price_desc" ? { "variants.0.pricePaise": -1 } : { createdAt: -1 };
-    const [items, total] = await Promise.all([
-      Product.find(f).select(PUBLIC_PRODUCT).sort(sort).skip((query.page - 1) * query.limit).limit(query.limit).lean(),
+    if (q.featured) base.isFeatured = true;
+    if (q.q) base.$or = [{ title: new RegExp(escapeRegex(q.q), "i") }, { tags: new RegExp(`^${escapeRegex(q.q)}`, "i") }];
+    // Item filter: base + the selected attribute facets.
+    const f: any = { ...base };
+    for (const k of FILTERABLE_ATTRS) {
+      const vals = splitFacet(q[k]);
+      if (vals.length) f[`attributes.${k}`] = { $in: vals };
+    }
+    const sort: any = q.sort === "price_asc" ? { "variants.0.pricePaise": 1 } : q.sort === "price_desc" ? { "variants.0.pricePaise": -1 } : { createdAt: -1 };
+    const facetStages = Object.fromEntries(
+      FILTERABLE_ATTRS.map((k) => [
+        k,
+        [{ $match: { [`attributes.${k}`]: { $exists: true, $ne: [] } } }, { $unwind: `$attributes.${k}` }, { $sortByCount: `$attributes.${k}` }, { $project: { _id: 0, value: "$_id", count: 1 } }],
+      ]),
+    );
+    const [items, total, facetAgg] = await Promise.all([
+      Product.find(f).select(PUBLIC_PRODUCT).sort(sort).skip((q.page - 1) * q.limit).limit(q.limit).lean(),
       Product.countDocuments(f),
+      Product.aggregate([{ $match: base }, { $facet: facetStages }]),
     ]);
-    return { items, total, page: query.page, limit: query.limit };
+    // Keep only facets that have values, preserving the declared order.
+    const raw = facetAgg[0] ?? {};
+    const facets: Record<string, { value: string; count: number }[]> = {};
+    for (const k of FILTERABLE_ATTRS) if (raw[k]?.length) facets[k] = raw[k];
+    return { items, total, page: q.page, limit: q.limit, facets };
   },
 });
 
@@ -139,7 +189,7 @@ add({ method: "get", path: "/cart", summary: "Current cart", auth: "customer-opt
 
 add({
   method: "post", path: "/cart/items", summary: "Add item to cart", auth: "customer-optional",
-  body: z.object({ productId: z.string(), variantId: z.string(), quantity: z.number().int().min(1).max(50).default(1) }),
+  body: z.object({ productId: z.string().regex(/^[a-f0-9]{24}$/), variantId: z.string().regex(/^[a-f0-9]{24}$/), quantity: z.number().int().min(1).max(50).default(1) }),
   handler: async ({ req, res, body }) => {
     const p = await Product.findOne({ _id: body.productId, status: "active", "variants._id": body.variantId }).lean();
     if (!p) throw notFound("Product");
@@ -183,7 +233,8 @@ add({
     await OtpCode.create({ phone: body.phone, codeHash: await bcrypt.hash(code, 8), expiresAt: new Date(Date.now() + 5 * 60_000) });
     const t = await Tenant.findById(tenantId).select("name").lean();
     await enqueueNotification({ type: "otp", tenantId, phone: body.phone, code, storeName: t?.name ?? "" });
-    return { sent: true, ...(env.NODE_ENV === "development" ? { devCode: code } : {}) };
+    const exposeDevCode = env.EXPOSE_DEV_OTP === "true" && env.NODE_ENV !== "production";
+    return { sent: true, ...(exposeDevCode ? { devCode: code } : {}) };
   },
 });
 
@@ -356,11 +407,11 @@ add({
     if (provider.name === "mock" && body?.mockSuccess === false) {
       s = { status: "failed" as const };
     } else {
-      s = await provider.fetchStatus(order.payment?.providerOrderId!);
+      s = await provider.fetchStatus(order.payment?.providerOrderId ?? "");
     }
 
     if (s.status === "paid") {
-      await markOrderPaid(String(order._id), s.paymentId);
+      await markOrderPaid(String(order._id), s.paymentId, s.amountPaise);
       const curr = await Order.findById(order._id);
       if (curr && ["pending_confirmation", "pending_payment"].includes(curr.status)) {
         await transitionOrder(String(order._id), "confirmed", { by: "system", note: "Paid online" });
@@ -429,7 +480,7 @@ add({
   params: z.object({ id: z.string().regex(/^[a-f0-9]{24}$/) }), body: z.object({ token: z.string().min(10) }),
   handler: async ({ params, body }) => {
     const order = await Order.findById(params.id).select("+codConfirmToken");
-    if (!order || order.codConfirmToken !== body.token) throw notFound("Order");
+    if (!order || !order.codConfirmToken || !timingSafeEqualStr(order.codConfirmToken, body.token)) throw notFound("Order");
     if (order.status === "pending_confirmation") await transitionOrder(params.id, "confirmed", { by: "customer", note: "COD confirmed by customer" });
     return { number: order.number, status: "confirmed" };
   },
@@ -450,7 +501,7 @@ add({
   handler: async ({ req, params }) => {
     const order = await Order.findOne({ _id: params.id, customerId: req.customer!.sub }).lean();
     if (!order) throw notFound("Order");
-    if (!["pending_payment", "pending_confirmation", "confirmed"].includes(order.status)) throw badRequest("This order can no longer be cancelled. Contact the store.");
+    if (!["pending_payment", "pending_confirmation", "confirmed"].includes(order.status) || order.shipment?.awb) throw badRequest("This order can no longer be cancelled. Contact the store.");
     await transitionOrder(params.id, "cancelled", { by: "customer", note: "Cancelled by customer" });
     return { status: "cancelled", refundNote: order.payment?.status === "paid" ? "The store will refund your payment." : undefined };
   },

@@ -43,6 +43,8 @@ const productSchema = new Schema(
     status: { type: String, enum: ["draft", "active", "archived"], default: "active" },
     isFeatured: { type: Boolean, default: false },
     tags: [String],
+    // Filterable facets, e.g. { strap: ["Leather"], occasion: ["Daily","Casual"] }. See modules/catalogAttrs.ts.
+    attributes: { type: Map, of: [String], default: {} },
     seo: { title: String, description: String },
   },
   { timestamps: true },

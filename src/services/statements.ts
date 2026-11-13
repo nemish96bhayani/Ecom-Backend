@@ -9,9 +9,35 @@ import { financialYear } from "./fy.js";
 import { renderTaxInvoice, renderShippingLabel } from "./pdf.js";
 import { logger } from "../lib/logger.js";
 
-export function previousPeriod(now = new Date()) {
-  const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+const IST_OFFSET_MS = 330 * 60_000;
+const fmtPeriod = (y: number, m0: number) => {
+  const d = new Date(Date.UTC(y, m0, 1));
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+};
+
+/** The IST calendar month containing `now`, as YYYY-MM. */
+export function currentPeriod(now = new Date()) {
+  const ist = new Date(now.getTime() + IST_OFFSET_MS);
+  return fmtPeriod(ist.getUTCFullYear(), ist.getUTCMonth());
+}
+
+/**
+ * The IST month before `now`. Must be IST: the billing cron runs at 02:00 IST on the 1st,
+ * which is still the last day of the previous month in UTC.
+ */
+export function previousPeriod(now = new Date()) {
+  const ist = new Date(now.getTime() + IST_OFFSET_MS);
+  return fmtPeriod(ist.getUTCFullYear(), ist.getUTCMonth() - 1);
+}
+
+/** Why a period can't be billed yet (null when it can): bad month, or the month hasn't ended in IST. */
+export function closedPeriodError(period: string, now = new Date()): string | null {
+  const m = /^(\d{4})-(\d{2})$/.exec(period);
+  if (!m) return "Use a period like 2026-10";
+  const month = Number(m[2]);
+  if (month < 1 || month > 12) return "The month must be between 01 and 12";
+  if (period >= currentPeriod(now)) return `${period} hasn't ended yet. Statements can only be generated for past months.`;
+  return null;
 }
 
 export function periodRange(period: string) {
@@ -39,7 +65,9 @@ export async function generateStatement(tenantId: string, period: string) {
     const commissions = await Commission.find({ status: "accrued", statementId: null, accruedAt: { $gte: start, $lt: end } }).lean();
     const commissionPaise = commissions.reduce((s, c) => s + (c.amountPaise ?? 0), 0);
     const gmvPaise = commissions.reduce((s, c) => s + (c.basePaise ?? 0), 0);
-    const monthlyFeePaise = tenant.plan?.monthlyFeePaise ?? 0;
+    // No monthly fee for months that ended before the store existed (no pro-rating).
+    const createdAt = tenant.createdAt ? new Date(tenant.createdAt as Date) : null;
+    const monthlyFeePaise = createdAt && end <= createdAt ? 0 : (tenant.plan?.monthlyFeePaise ?? 0);
     const taxable = commissionPaise + monthlyFeePaise;
     if (taxable === 0) return null;
     const tax = Math.round((taxable * env.COMMISSION_GST_PERCENT) / 100);
@@ -66,13 +94,16 @@ export async function generateStatement(tenantId: string, period: string) {
 
 export async function generateAllStatements(period = previousPeriod()) {
   const tenants = await runWithoutTenant("monthly-billing", () => Tenant.find({ status: { $ne: "pending" } }).select("_id").lean());
+  let created = 0;
   for (const t of tenants) {
     try {
-      await generateStatement(String(t._id), period);
+      const existed = await runAsTenant(String(t._id), () => Statement.exists({ period }));
+      if ((await generateStatement(String(t._id), period)) && !existed) created++;
     } catch (err) {
       logger.error({ err, tenantId: t._id, period }, "Statement generation failed");
     }
   }
+  return created;
 }
 
 export async function statementPdf(tenantId: string, statementId: string) {

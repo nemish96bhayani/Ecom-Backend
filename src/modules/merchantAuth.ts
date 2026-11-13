@@ -6,9 +6,12 @@ import { User } from "../models/people.js";
 import { PlatformAdmin, Tenant, AuditLog } from "../models/platform.js";
 import { runWithoutTenant, requireTenantId } from "../db/tenantContext.js";
 import { signAccess, signRefresh, verifyRefresh } from "../lib/jwt.js";
-import { unauthorized, badRequest, notFound } from "../lib/errors.js";
-import { isProd } from "../config/env.js";
+import { unauthorized, badRequest, notFound, conflict } from "../lib/errors.js";
+import { env, isProd } from "../config/env.js";
+import { randomToken, sha256 } from "../lib/crypto.js";
+import { sendEmail } from "../integrations/notifications/index.js";
 import { idParams } from "../http/route.js";
+import { invalidateMerchantUser } from "../middleware/guards.js";
 
 const { router, add } = moduleFor("Auth", "/api/v1/auth");
 export default router;
@@ -26,8 +29,8 @@ add({
     if (!user || !(await bcrypt.compare(body.password, user.passwordHash))) throw unauthorized("Email or password is incorrect");
     const tenant = await Tenant.findById(user.tenantId).select("status name slug").lean();
     if (!tenant || tenant.status === "suspended") throw unauthorized("This store is suspended. Contact platform support.");
-    const claims = { sub: String(user._id), tenantId: String(user.tenantId), role: user.role as "owner" | "staff", kind: "merchant" as const };
-    setRefresh(res, signRefresh({ ...claims, ver: user.authVersion ?? 0 }));
+    const claims = { sub: String(user._id), tenantId: String(user.tenantId), role: user.role as "owner" | "staff", kind: "merchant" as const, ver: user.authVersion ?? 0 };
+    setRefresh(res, signRefresh(claims));
     await runWithoutTenant("merchant-login", () => User.updateOne({ _id: user._id }, { $set: { lastLoginAt: new Date() } }));
     return { accessToken: signAccess(claims), user: { id: user._id, email: user.email, name: user.name, role: user.role }, tenant: { id: tenant._id, name: tenant.name, slug: tenant.slug } };
   },
@@ -59,8 +62,8 @@ add({
     if (c.kind === "merchant") {
       const u = await runWithoutTenant("refresh", () => User.findById(c.sub).lean());
       if (!u || !u.isActive || (u.authVersion ?? 0) !== c.ver) throw unauthorized("Your session expired. Sign in again.");
-      const claims = { sub: c.sub, tenantId: c.tenantId, role: u.role as "owner" | "staff", kind: "merchant" as const };
-      setRefresh(res, signRefresh({ ...claims, ver: c.ver }));
+      const claims = { sub: c.sub, tenantId: c.tenantId, role: u.role as "owner" | "staff", kind: "merchant" as const, ver: c.ver };
+      setRefresh(res, signRefresh(claims));
       return { accessToken: signAccess(claims) };
     }
     const a = await PlatformAdmin.findById(c.sub).lean();
@@ -72,7 +75,21 @@ add({
 
 add({
   method: "post", path: "/logout", summary: "Sign out", auth: "public",
-  handler: ({ res }) => {
+  handler: async ({ req, res }) => {
+    // Revoke server-side (not just the cookie): bump authVersion so a captured refresh token can't be replayed after logout.
+    const token = req.cookies?.[REFRESH_COOKIE];
+    if (token) {
+      try {
+        const c = verifyRefresh(token);
+        if (c.kind === "merchant") {
+          await runWithoutTenant("logout", () => User.updateOne({ _id: c.sub }, { $inc: { authVersion: 1 } }));
+          invalidateMerchantUser(c.sub);
+        }
+        else await PlatformAdmin.updateOne({ _id: c.sub }, { $inc: { authVersion: 1 } });
+      } catch {
+        // invalid/expired token: nothing to revoke
+      }
+    }
     res.clearCookie(REFRESH_COOKIE, { path: "/api/v1/auth" });
     return { ok: true };
   },
@@ -91,12 +108,65 @@ add({
 add({
   method: "post", path: "/change-password", summary: "Change your password (signs out other sessions)", auth: "merchant",
   body: z.object({ currentPassword: z.string(), newPassword: z.string().min(10, "Use at least 10 characters") }),
-  handler: async ({ req, body }) => {
+  handler: async ({ req, res, body }) => {
     const user = await User.findById(req.auth!.sub).select("+passwordHash");
     if (!user || !(await bcrypt.compare(body.currentPassword, user.passwordHash))) throw badRequest("Current password is incorrect");
     user.passwordHash = await bcrypt.hash(body.newPassword, 12);
     user.authVersion = (user.authVersion ?? 0) + 1;
     await user.save();
+    invalidateMerchantUser(String(user._id));
+    // Other sessions are revoked by the authVersion bump; keep this one signed in with a fresh refresh cookie and access token.
+    const claims = { sub: String(user._id), tenantId: String(user.tenantId), role: user.role as "owner" | "staff", kind: "merchant" as const, ver: user.authVersion };
+    setRefresh(res, signRefresh(claims));
+    return { ok: true, accessToken: signAccess(claims) };
+  },
+});
+
+// ---- Forgotten password (merchant users) ----
+const RESET_MINUTES = 60;
+
+add({
+  method: "post", path: "/forgot-password", summary: "Email a password reset link", auth: "public",
+  body: z.object({ email: z.email() }),
+  handler: async ({ body }) => {
+    const email = body.email.toLowerCase();
+    const user = await runWithoutTenant("forgot-password", () => User.findOne({ email, isActive: true }));
+    let devResetUrl: string | undefined;
+    if (user) {
+      const token = randomToken(32);
+      user.set({ resetTokenHash: sha256(token), resetExpiresAt: new Date(Date.now() + RESET_MINUTES * 60_000) });
+      await runWithoutTenant("forgot-password", () => user.save());
+      const adminUrl = env.ADMIN_ORIGINS.split(",")[0].trim();
+      const link = `${adminUrl}/reset-password?token=${encodeURIComponent(token)}`;
+      await sendEmail(
+        email,
+        "Reset your store password",
+        `<p>Someone asked to reset the password for this account.</p><p><a href="${link}">Choose a new password</a> (valid for ${RESET_MINUTES} minutes).</p><p>If this wasn't you, ignore this email.</p>`,
+      );
+      // Local development without SMTP: optionally hand the link back so the flow can be tested.
+      if (env.EXPOSE_DEV_OTP === "true" && !isProd) devResetUrl = link;
+    }
+    // Same answer whether or not the email exists, so this can't be used to discover accounts.
+    return { ok: true, ...(devResetUrl ? { devResetUrl } : {}) };
+  },
+});
+
+add({
+  method: "post", path: "/reset-password", summary: "Set a new password using the emailed link", auth: "public",
+  body: z.object({ token: z.string().min(20), password: z.string().min(10, "Use at least 10 characters") }),
+  handler: async ({ body }) => {
+    const user = await runWithoutTenant("reset-password", () =>
+      User.findOne({ resetTokenHash: sha256(body.token), resetExpiresAt: { $gt: new Date() } }).select("+resetTokenHash +resetExpiresAt"),
+    );
+    if (!user) throw badRequest("This reset link is invalid or has expired. Request a new one.");
+    user.set({
+      passwordHash: await bcrypt.hash(body.password, 12),
+      authVersion: (user.authVersion ?? 0) + 1, // signs out every existing session
+      resetTokenHash: null,
+      resetExpiresAt: null,
+    });
+    await runWithoutTenant("reset-password", () => user.save());
+    invalidateMerchantUser(String(user._id));
     return { ok: true };
   },
 });
@@ -120,9 +190,23 @@ add({
   method: "patch", path: "/staff/:id", summary: "Update or deactivate a staff member", auth: "owner", params: idParams,
   body: z.object({ role: z.enum(["owner", "staff"]).optional(), isActive: z.boolean().optional() }),
   handler: async ({ params, body, req }) => {
-    if (params.id === req.auth!.sub && body.isActive === false) throw badRequest("You can't deactivate yourself");
-    const u = await User.findByIdAndUpdate(params.id, { $set: body, $inc: { authVersion: 1 } }, { new: true }).lean();
+    const self = params.id === req.auth!.sub;
+    if (self && body.isActive === false) throw badRequest("You can't deactivate yourself");
+    const current = await User.findById(params.id).select("role isActive").lean();
+    if (!current) throw notFound("Staff member");
+    if (self && body.role !== undefined && body.role !== current.role) throw badRequest("You can't change your own role. Ask another owner.");
+    const changes: Record<string, unknown> = {};
+    if (body.role !== undefined && body.role !== current.role) changes.role = body.role;
+    if (body.isActive !== undefined && body.isActive !== current.isActive) changes.isActive = body.isActive;
+    if (!Object.keys(changes).length) return { id: current._id, role: current.role, isActive: current.isActive };
+    // The store must keep at least one active owner.
+    const losesOwner = current.role === "owner" && current.isActive !== false && (changes.role === "staff" || changes.isActive === false);
+    if (losesOwner && (await User.countDocuments({ _id: { $ne: current._id }, role: "owner", isActive: true })) === 0) {
+      throw conflict("This is the only active owner. Make someone else an owner first.");
+    }
+    const u = await User.findByIdAndUpdate(params.id, { $set: changes, $inc: { authVersion: 1 } }, { new: true }).lean();
     if (!u) throw notFound("Staff member");
+    invalidateMerchantUser(params.id);
     return { id: u._id, role: u.role, isActive: u.isActive };
   },
 });
@@ -165,7 +249,7 @@ add({
       user.role = "owner";
       user.isActive = true;
       user.authVersion = (user.authVersion ?? 0) + 1;
-      await user.save();
+      await runWithoutTenant("claim-user", () => user!.save());
     } else {
       user = await runWithoutTenant("claim-user", () =>
         User.create({
@@ -185,8 +269,9 @@ add({
     (tenant as any).handoverExpiresAt = null;
     await tenant.save();
 
-    const claims = { sub: String(user._id), tenantId: String(tenant._id), role: "owner" as const, kind: "merchant" as const };
-    setRefresh(res, signRefresh({ ...claims, ver: user.authVersion ?? 0 }));
+    invalidateMerchantUser(String(user._id));
+    const claims = { sub: String(user._id), tenantId: String(tenant._id), role: "owner" as const, kind: "merchant" as const, ver: user.authVersion ?? 0 };
+    setRefresh(res, signRefresh(claims));
     await AuditLog.create({ actor: `user:${user._id}`, action: "tenant.handover_claimed", tenantId: tenant._id, meta: { email: user.email } });
 
     return {

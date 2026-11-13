@@ -253,6 +253,100 @@
         }
       }
     },
+    "/api/v1/auth/forgot-password": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Email a password reset link",
+        "operationId": "post__api_v1_auth_forgot_password",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {}
+                  }
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "format": "email",
+                    "pattern": "^(?:[A-Za-z0-9_'+\\-]+\\.)*[A-Za-z0-9_'+\\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
+                  }
+                },
+                "required": [
+                  "email"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/reset-password": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Set a new password using the emailed link",
+        "operationId": "post__api_v1_auth_reset_password",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {}
+                  }
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "token": {
+                    "type": "string",
+                    "minLength": 20
+                  },
+                  "password": {
+                    "type": "string",
+                    "minLength": 10
+                  }
+                },
+                "required": [
+                  "token",
+                  "password"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/auth/staff": {
       "get": {
         "tags": [
@@ -576,19 +670,27 @@
                 "properties": {
                   "name": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "maxLength": 120
                   },
                   "slug": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 120
                   },
                   "parentId": {
-                    "type": [
-                      "string",
-                      "null"
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{24}$"
+                      },
+                      {
+                        "type": "null"
+                      }
                     ]
                   },
                   "imageUrl": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 2000
                   },
                   "sortOrder": {
                     "type": "integer",
@@ -656,19 +758,27 @@
                 "properties": {
                   "name": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "maxLength": 120
                   },
                   "slug": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 120
                   },
                   "parentId": {
-                    "type": [
-                      "string",
-                      "null"
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{24}$"
+                      },
+                      {
+                        "type": "null"
+                      }
                     ]
                   },
                   "imageUrl": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 2000
                   },
                   "sortOrder": {
                     "type": "integer",
@@ -799,7 +909,8 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "pattern": "^[a-f0-9]{24}$"
             }
           },
           {
@@ -807,7 +918,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "boolean"
+              "type": "string"
             }
           }
         ]
@@ -848,36 +959,45 @@
                 "properties": {
                   "title": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "maxLength": 200
                   },
                   "slug": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 120
                   },
                   "description": {
                     "default": "",
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 20000
                   },
                   "brand": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 120
                   },
                   "categoryIds": {
                     "default": [],
+                    "maxItems": 50,
                     "type": "array",
                     "items": {
-                      "type": "string"
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{24}$"
                     }
                   },
                   "images": {
                     "default": [],
+                    "maxItems": 50,
                     "type": "array",
                     "items": {
                       "type": "object",
                       "properties": {
                         "url": {
-                          "type": "string"
+                          "type": "string",
+                          "maxLength": 2000
                         },
                         "alt": {
-                          "type": "string"
+                          "type": "string",
+                          "maxLength": 300
                         }
                       },
                       "required": [
@@ -887,23 +1007,28 @@
                   },
                   "optionNames": {
                     "default": [],
+                    "maxItems": 3,
                     "type": "array",
                     "items": {
-                      "type": "string"
+                      "type": "string",
+                      "maxLength": 50
                     }
                   },
                   "variants": {
                     "minItems": 1,
+                    "maxItems": 250,
                     "type": "array",
                     "items": {
                       "type": "object",
                       "properties": {
                         "_id": {
-                          "type": "string"
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{24}$"
                         },
                         "sku": {
                           "type": "string",
-                          "minLength": 1
+                          "minLength": 1,
+                          "maxLength": 64
                         },
                         "options": {
                           "default": {},
@@ -933,7 +1058,6 @@
                           ]
                         },
                         "stock": {
-                          "default": 0,
                           "type": "integer",
                           "minimum": 0,
                           "maximum": 9007199254740991
@@ -950,7 +1074,8 @@
                           ]
                         },
                         "imageUrl": {
-                          "type": "string"
+                          "type": "string",
+                          "maxLength": 2000
                         }
                       },
                       "required": [
@@ -983,9 +1108,23 @@
                   },
                   "tags": {
                     "default": [],
+                    "maxItems": 50,
                     "type": "array",
                     "items": {
+                      "type": "string",
+                      "maxLength": 50
+                    }
+                  },
+                  "attributes": {
+                    "type": "object",
+                    "propertyNames": {
                       "type": "string"
+                    },
+                    "additionalProperties": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
                     }
                   },
                   "seo": {
@@ -1096,36 +1235,45 @@
                 "properties": {
                   "title": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "maxLength": 200
                   },
                   "slug": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 120
                   },
                   "description": {
                     "default": "",
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 20000
                   },
                   "brand": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 120
                   },
                   "categoryIds": {
                     "default": [],
+                    "maxItems": 50,
                     "type": "array",
                     "items": {
-                      "type": "string"
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{24}$"
                     }
                   },
                   "images": {
                     "default": [],
+                    "maxItems": 50,
                     "type": "array",
                     "items": {
                       "type": "object",
                       "properties": {
                         "url": {
-                          "type": "string"
+                          "type": "string",
+                          "maxLength": 2000
                         },
                         "alt": {
-                          "type": "string"
+                          "type": "string",
+                          "maxLength": 300
                         }
                       },
                       "required": [
@@ -1135,23 +1283,28 @@
                   },
                   "optionNames": {
                     "default": [],
+                    "maxItems": 3,
                     "type": "array",
                     "items": {
-                      "type": "string"
+                      "type": "string",
+                      "maxLength": 50
                     }
                   },
                   "variants": {
                     "minItems": 1,
+                    "maxItems": 250,
                     "type": "array",
                     "items": {
                       "type": "object",
                       "properties": {
                         "_id": {
-                          "type": "string"
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{24}$"
                         },
                         "sku": {
                           "type": "string",
-                          "minLength": 1
+                          "minLength": 1,
+                          "maxLength": 64
                         },
                         "options": {
                           "default": {},
@@ -1181,7 +1334,6 @@
                           ]
                         },
                         "stock": {
-                          "default": 0,
                           "type": "integer",
                           "minimum": 0,
                           "maximum": 9007199254740991
@@ -1198,7 +1350,8 @@
                           ]
                         },
                         "imageUrl": {
-                          "type": "string"
+                          "type": "string",
+                          "maxLength": 2000
                         }
                       },
                       "required": [
@@ -1231,9 +1384,23 @@
                   },
                   "tags": {
                     "default": [],
+                    "maxItems": 50,
                     "type": "array",
                     "items": {
+                      "type": "string",
+                      "maxLength": 50
+                    }
+                  },
+                  "attributes": {
+                    "type": "object",
+                    "propertyNames": {
                       "type": "string"
+                    },
+                    "additionalProperties": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
                     }
                   },
                   "seo": {
@@ -1343,12 +1510,14 @@
                 "type": "object",
                 "properties": {
                   "updates": {
+                    "maxItems": 250,
                     "type": "array",
                     "items": {
                       "type": "object",
                       "properties": {
                         "variantId": {
-                          "type": "string"
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{24}$"
                         },
                         "stock": {
                           "type": "integer",
@@ -1575,8 +1744,30 @@
                       }
                     ]
                   },
-                  "startsAt": {},
-                  "endsAt": {},
+                  "startsAt": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": ""
+                      },
+                      {
+                        "type": "null"
+                      },
+                      {}
+                    ]
+                  },
+                  "endsAt": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": ""
+                      },
+                      {
+                        "type": "null"
+                      },
+                      {}
+                    ]
+                  },
                   "usageLimit": {
                     "anyOf": [
                       {
@@ -1685,8 +1876,30 @@
                       }
                     ]
                   },
-                  "startsAt": {},
-                  "endsAt": {},
+                  "startsAt": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": ""
+                      },
+                      {
+                        "type": "null"
+                      },
+                      {}
+                    ]
+                  },
+                  "endsAt": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": ""
+                      },
+                      {
+                        "type": "null"
+                      },
+                      {}
+                    ]
+                  },
                   "usageLimit": {
                     "anyOf": [
                       {
@@ -1812,14 +2025,17 @@
                 "properties": {
                   "title": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "maxLength": 200
                   },
                   "slug": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 120
                   },
                   "body": {
                     "default": "",
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 200000
                   },
                   "isPublished": {
                     "default": true,
@@ -1883,14 +2099,17 @@
                 "properties": {
                   "title": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "maxLength": 200
                   },
                   "slug": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 120
                   },
                   "body": {
                     "default": "",
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 200000
                   },
                   "isPublished": {
                     "default": true,
@@ -2150,7 +2369,8 @@
                     ]
                   },
                   "note": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 1000
                   }
                 },
                 "required": [
@@ -2215,7 +2435,8 @@
                   },
                   "reason": {
                     "type": "string",
-                    "minLength": 2
+                    "minLength": 2,
+                    "maxLength": 500
                   }
                 },
                 "required": [
@@ -2871,7 +3092,7 @@
                           },
                           "codMaxPaise": {
                             "type": "integer",
-                            "minimum": -9007199254740991,
+                            "minimum": 0,
                             "maximum": 9007199254740991
                           },
                           "prepaidDiscountPaise": {
@@ -3595,7 +3816,8 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "pattern": "^[a-f0-9]{24}$"
             }
           }
         ]
@@ -3840,10 +4062,12 @@
                   },
                   "name": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "maxLength": 200
                   },
                   "utmCampaign": {
                     "type": "string",
+                    "maxLength": 100,
                     "pattern": "^[a-z0-9_-]+$"
                   },
                   "status": {
@@ -3856,15 +4080,38 @@
                       "ended"
                     ]
                   },
-                  "startDate": {},
-                  "endDate": {},
+                  "startDate": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": ""
+                      },
+                      {
+                        "type": "null"
+                      },
+                      {}
+                    ]
+                  },
+                  "endDate": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": ""
+                      },
+                      {
+                        "type": "null"
+                      },
+                      {}
+                    ]
+                  },
                   "budgetPaise": {
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 9007199254740991
                   },
                   "notes": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 5000
                   }
                 },
                 "required": [
@@ -3934,10 +4181,12 @@
                   },
                   "name": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "maxLength": 200
                   },
                   "utmCampaign": {
                     "type": "string",
+                    "maxLength": 100,
                     "pattern": "^[a-z0-9_-]+$"
                   },
                   "status": {
@@ -3950,15 +4199,38 @@
                       "ended"
                     ]
                   },
-                  "startDate": {},
-                  "endDate": {},
+                  "startDate": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": ""
+                      },
+                      {
+                        "type": "null"
+                      },
+                      {}
+                    ]
+                  },
+                  "endDate": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "const": ""
+                      },
+                      {
+                        "type": "null"
+                      },
+                      {}
+                    ]
+                  },
                   "budgetPaise": {
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 9007199254740991
                   },
                   "notes": {
-                    "type": "string"
+                    "type": "string",
+                    "maxLength": 5000
                   }
                 }
               }
@@ -4015,6 +4287,7 @@
                 "properties": {
                   "entries": {
                     "minItems": 1,
+                    "maxItems": 400,
                     "type": "array",
                     "items": {
                       "type": "object",
@@ -4182,6 +4455,56 @@
         ]
       }
     },
+    "/api/v1/store/subscribe": {
+      "post": {
+        "tags": [
+          "Storefront"
+        ],
+        "summary": "Join the newsletter (email updates)",
+        "operationId": "post__api_v1_store_subscribe",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {}
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "storeProxy": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "format": "email",
+                    "pattern": "^(?:[A-Za-z0-9_'+\\-]+\\.)*[A-Za-z0-9_'+\\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
+                  }
+                },
+                "required": [
+                  "email"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/store/products": {
       "get": {
         "tags": [
@@ -4253,7 +4576,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "boolean"
+              "type": "string"
             }
           },
           {
@@ -4268,6 +4591,132 @@
                 "price_asc",
                 "price_desc",
                 "relevance"
+              ]
+            }
+          },
+          {
+            "name": "strap",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "name": "color",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "name": "dial",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "name": "lock",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "name": "occasion",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "name": "movement",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "name": "gender",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
               ]
             }
           }
@@ -4446,10 +4895,12 @@
                 "type": "object",
                 "properties": {
                   "productId": {
-                    "type": "string"
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{24}$"
                   },
                   "variantId": {
-                    "type": "string"
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{24}$"
                   },
                   "quantity": {
                     "default": 1,
@@ -5532,8 +5983,8 @@
                   "slug": {
                     "type": "string",
                     "minLength": 2,
-                    "maxLength": 40,
-                    "pattern": "^[a-z0-9-]+$"
+                    "maxLength": 63,
+                    "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$"
                   },
                   "owner": {
                     "type": "object",
@@ -5913,7 +6364,8 @@
                     "pattern": "^\\d{4}-\\d{2}$"
                   },
                   "tenantId": {
-                    "type": "string"
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{24}$"
                   }
                 }
               }

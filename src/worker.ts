@@ -1,4 +1,5 @@
 import { Worker } from "bullmq";
+import mongoose from "mongoose";
 import { connectDb } from "./db/connect.js";
 import { logger } from "./lib/logger.js";
 import { maintenanceQueue, queueConnection, type NotificationJob } from "./jobs/queues.js";
@@ -7,7 +8,7 @@ import { processNotification, releaseExpiredOrders, monthlyBilling, dunning, dom
 async function main() {
   await connectDb();
 
-  new Worker<NotificationJob>("notifications", (job) => processNotification(job.data), { connection: queueConnection, concurrency: 10 })
+  const notifications = new Worker<NotificationJob>("notifications", (job) => processNotification(job.data), { connection: queueConnection, concurrency: 10 })
     .on("failed", (job, err) => logger.error({ err, job: job?.name }, "Notification job failed"));
 
   const handlers: Record<string, () => Promise<unknown>> = {
@@ -16,8 +17,22 @@ async function main() {
     dunning,
     "domain-health": domainHealth,
   };
-  new Worker("maintenance", async (job) => handlers[job.name]?.(), { connection: queueConnection, concurrency: 1 })
+  const maintenance = new Worker("maintenance", async (job) => handlers[job.name]?.(), { connection: queueConnection, concurrency: 1 })
     .on("failed", (job, err) => logger.error({ err, job: job?.name }, "Maintenance job failed"));
+
+  // On deploy/stop, let running jobs finish instead of cutting them off mid-way (BullMQ retries anything unfinished).
+  let stopping = false;
+  const shutdown = async () => {
+    if (stopping) return;
+    stopping = true;
+    logger.info("Worker shutting down: waiting for running jobs");
+    setTimeout(() => process.exit(1), 30_000).unref();
+    await Promise.allSettled([notifications.close(), maintenance.close()]);
+    await mongoose.disconnect().catch(() => undefined);
+    process.exit(0);
+  };
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
 
   // Repeatable schedules (times in IST).
   await maintenanceQueue().upsertJobScheduler("release-expired-orders", { every: 5 * 60_000 }, { name: "release-expired-orders" });

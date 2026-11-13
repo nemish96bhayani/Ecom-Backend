@@ -133,6 +133,8 @@ const orderSchema = new Schema(
     utm: { source: String, medium: String, campaign: String, content: String, term: String, fbclid: String, gclid: String },
     notes: String,
     stockReleased: { type: Boolean, default: false },
+    couponReleased: { type: Boolean, default: false }, // coupon redemption handed back after an unconfirmed order failed/cancelled
+    shipmentLockAt: Date, // set while a courier booking is in progress, so a double click can't book two shipments
     expiresAt: Date, // for pending_payment orders – stock is released after this
   },
   { timestamps: true },
